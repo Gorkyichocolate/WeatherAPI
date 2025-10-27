@@ -1,13 +1,24 @@
+import json
+import os
 from fastapi import FastAPI, HTTPException, Query
 import httpx
 
 app = FastAPI()
 
+def weather_json(data):
+    folder = r"C:\Users\beyba\PycharmProjects\WeatherAPI\Weather json"
+    path = os.path.join(folder, "weather.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+    print(f"✅ Weather data saved to: {path}")
+
+
 @app.get("/api/weather/{city}")
 async def weather(city: str, units: str | None = Query(default="metric")):
     normalized_units = units.lower() if units else "metric"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=20.0) as client:
         geo_response = await client.get(
             "https://geocoding-api.open-meteo.com/v1/search",
             params={
@@ -50,13 +61,16 @@ async def weather(city: str, units: str | None = Query(default="metric")):
             weather_response.raise_for_status()
             weather_data = weather_response.json()
 
-            return {
+            result = {
                 "city": name,
                 "country": country,
-                "latitude": latitude,
-                "longitude": longitude,
                 "units": normalized_units,
                 "current": weather_data["current"]
             }
+
+            weather_json(result)
+
+            return result
+
         except httpx.HTTPError as e:
             raise HTTPException(status_code=500, detail=f"Weather API error: {str(e)}")
