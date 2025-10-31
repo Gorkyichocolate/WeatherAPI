@@ -1,76 +1,66 @@
 import json
-import os
-from fastapi import FastAPI, HTTPException, Query
 import httpx
+from pika import BlockingConnection, ConnectionParameters
 
-app = FastAPI()
+connection = BlockingConnection(ConnectionParameters(host="localhost"))
+channel = connection.channel()
 
-def weather_json(data):
-    folder = r"C:\Users\beyba\PycharmProjects\WeatherAPI\Weather json"
-    path = os.path.join(folder, "weather.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+channel.queue_declare(queue="weather_request")
+channel.queue_declare(queue="weather_response")
 
-    print(f"✅ Weather data saved to: {path}")
+print("///")
 
-
-@app.get("/api/weather/{city}")
-async def weather(city: str, units: str | None = Query(default="metric")):
-    normalized_units = units.lower() if units else "metric"
-
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        geo_response = await client.get(
+def get_weather(city: str):
+    try:
+        geo = httpx.get(
             "https://geocoding-api.open-meteo.com/v1/search",
-            params={
-                "name": city,
-                "count": 1,
-                "language": "en",
-                "format": "json"
-            }
-        )
+            params={"name": city, "count": 1, "language": "en", "format": "json"},
+            timeout=10.0,
+        ).json()
+        if not geo.get("results"):
+            return {"error": "City not found"}
 
-        try:
-            geo_response.raise_for_status()
-            geo_data = geo_response.json()
+        lat = geo["results"][0]["latitude"]
+        lon = geo["results"][0]["longitude"]
+        name = geo["results"][0]["name"]
+        country = geo["results"][0]["country"]
 
-            if not geo_data.get("results"):
-                raise HTTPException(status_code=404, detail="City not found")
-
-            location = geo_data["results"][0]
-            name = location["name"]
-            country = location["country"]
-            latitude = location["latitude"]
-            longitude = location["longitude"]
-
-        except httpx.HTTPError:
-            raise HTTPException(status_code=500, detail="Geocoding API error")
-
-        weather_params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m",
-            "timezone": "auto"
-        }
-
-        weather_response = await client.get(
+        weather = httpx.get(
             "https://api.open-meteo.com/v1/forecast",
-            params=weather_params
-        )
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,relative_humidity_2m,wind_speed_10m",
+                "timezone": "auto",
+            },
+            timeout=10.0,
+        ).json()
 
-        try:
-            weather_response.raise_for_status()
-            weather_data = weather_response.json()
+        return {
+            "city": name,
+            "country": country,
+            "temperature": weather["current"]["temperature_2m"],
+            "humidity": weather["current"]["relative_humidity_2m"],
+            "wind_speed": weather["current"]["wind_speed_10m"],
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
-            result = {
-                "city": name,
-                "country": country,
-                "units": normalized_units,
-                "current": weather_data["current"]
-            }
+def on_request(ch, method, props, body):
+    city = body.decode("utf-8")
+    print(f"[x] Received request for city: {city}")
 
-            weather_json(result)
+    result = get_weather(city)
+    response_body = json.dumps(result).encode("utf-8")
 
-            return result
+    ch.basic_publish(
+        exchange="",
+        routing_key="weather_response",
+        body=response_body,
+        properties=None,
+    )
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+    print(f"[x] Sent response for city: {city}")
 
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=500, detail=f"Weather API error: {str(e)}")
+channel.basic_consume(queue="weather_request", on_message_callback=on_request)
+channel.start_consuming()
